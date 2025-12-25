@@ -1,0 +1,53 @@
+# Ignore node_modules (will be installed in container)
+node_modules/
+
+# Ignore environment variables (set in Back4App dashboard)
+.env
+
+# Ignore user data and uploads
+data/
+
+# Ignore logs
+logs/
+*.log
+
+# Ignore PM2 files (not needed for Docker)
+ecosystem.config.cjs
+.pm2/
+
+# Ignore Git files
+.git/
+.gitignore
+
+# Ignore documentation files
+*.md
+DEPLOYMENT.md
+CPANEL-MEMORY-FIX.md
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore temporary files
+*.tmp
+*.temp
+
+# Ignore package lock (optional - uncomment if you want)
+# package-lock.json
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore test files
+test/
+*.test.js
+
+# Ignore build artifacts
+dist/
+build/
+
+# Ignore shell scripts
+*.sh
