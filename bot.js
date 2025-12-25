@@ -11,6 +11,7 @@ dotenv.config();
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const STAMP_LABELS = String(process.env.STAMP_LABELS || "false").toLowerCase() === "true";
+const ADMIN_ID = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID) : null;
 
 if (!BOT_TOKEN) {
   console.error("Missing BOT_TOKEN in .env");
@@ -158,7 +159,7 @@ async function makeSinglePagePdf(frontImg, backImg, outPdf) {
   return outPdf;
 }
 
-async function makeMultiIdPdf(pairs, outPdf) {
+async function makeMultiIdPdf(pairs, outPdf, flipImages = false) {
   const doc = new PDFDocument({ autoFirstPage: false });
   const count = Math.min(pairs.length, 5);
 
@@ -203,18 +204,36 @@ async function makeMultiIdPdf(pairs, outPdf) {
         const yPos = verticalPositions[row] || verticalPositions[verticalPositions.length - 1];
 
         // FRONT
-        doc.image(pairs[i].front, frontX, yPos, {
+        const frontOptions = {
           fit: [LAYOUT.frontBox.w, LAYOUT.frontBox.h],
           align: "center",
           valign: "center"
-        });
+        };
+        if (flipImages) {
+          doc.save();
+          doc.translate(frontX + LAYOUT.frontBox.w, yPos);
+          doc.scale(-1, 1);  // Flip horizontally
+          doc.image(pairs[i].front, 0, 0, frontOptions);
+          doc.restore();
+        } else {
+          doc.image(pairs[i].front, frontX, yPos, frontOptions);
+        }
 
         // BACK
-        doc.image(pairs[i].back, backX, yPos, {
+        const backOptions = {
           fit: [LAYOUT.backBox.w, LAYOUT.backBox.h],
           align: "center",
           valign: "center"
-        });
+        };
+        if (flipImages) {
+          doc.save();
+          doc.translate(backX + LAYOUT.backBox.w, yPos);
+          doc.scale(-1, 1);  // Flip horizontally
+          doc.image(pairs[i].back, 0, 0, backOptions);
+          doc.restore();
+        } else {
+          doc.image(pairs[i].back, backX, yPos, backOptions);
+        }
       }
 
       doc.end();
@@ -267,8 +286,38 @@ bot.onText(/\/start/, async (msg) => {
 
 bot.onText(/\/reset/, async (msg) => {
   const chatId = msg.chat.id;
-  state.set(chatId, { pairs: [], fronts: [], backs: [], sequence: 0, currentGroup: 0, imageGroups: [[]] });
-  await bot.sendMessage(chatId, "✅ Reset done.");
+  const userId = msg.from.id;
+  
+  // Check if user is admin
+  if (ADMIN_ID && userId === ADMIN_ID) {
+    try {
+      // Admin: Delete entire data folder
+      if (fs.existsSync(ROOT)) {
+        fs.rmSync(ROOT, { recursive: true, force: true });
+        fs.mkdirSync(ROOT, { recursive: true });
+      }
+      
+      // Clear all chat states
+      state.clear();
+      
+      await bot.sendMessage(chatId, "🔐 Admin Reset: All data deleted from server.");
+    } catch (e) {
+      await bot.sendMessage(chatId, `❌ Admin reset failed: ${e.message}`);
+    }
+  } else {
+    // Regular user: Reset only their own state and delete their folder
+    try {
+      const userDir = path.join(ROOT, String(chatId));
+      if (fs.existsSync(userDir)) {
+        fs.rmSync(userDir, { recursive: true, force: true });
+      }
+      
+      state.set(chatId, { pairs: [], fronts: [], backs: [], sequence: 0, currentGroup: 0, imageGroups: [[]] });
+      await bot.sendMessage(chatId, "✅ Reset done. Your data cleared.");
+    } catch (e) {
+      await bot.sendMessage(chatId, `⚠️ Reset failed: ${e.message}`);
+    }
+  }
 });
 
 bot.onText(/\/next/, async (msg) => {
@@ -393,40 +442,109 @@ bot.onText(/\/pdf/, async (msg) => {
     return;
   }
 
-  const jobDir = path.join(ROOT, String(chatId), uuidv4());
-  ensureDir(jobDir);
+  // Store pairs in state for callback handler
+  st.pendingPairs = pairs;
+  
+  // Show orientation selection buttons
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "📄 Normal", callback_data: "pdf_normal" },
+        { text: "🔄 Flip", callback_data: "pdf_flip" }
+      ]
+    ]
+  };
+  
+  await bot.sendMessage(
+    chatId,
+    `📋 Ready to generate PDF with ${pairs.length} ID(s).\n\nChoose orientation:`,
+    { reply_markup: keyboard }
+  );
+});
 
-  try {
-    const pairsToUse = [];
-
-    // Optional labels (keep OFF to preserve zero changes)
-    if (STAMP_LABELS) {
-      for (let i = 0; i < pairs.length; i++) {
-        const f = path.join(jobDir, `front_${i}_labeled.png`);
-        const b = path.join(jobDir, `back_${i}_labeled.png`);
-        await stampLabel(pairs[i].front, "FRONT", f);
-        await stampLabel(pairs[i].back, "BACK", b);
-        pairsToUse.push({ front: f, back: b });
+// Handle button callbacks for PDF orientation
+bot.on("callback_query", async (query) => {
+  const chatId = query.message.chat.id;
+  const data = query.data;
+  const st = getState(chatId);
+  
+  if (data === "user_reset") {
+    // Handle reset button click
+    await bot.answerCallbackQuery(query.id, { text: "Resetting your data..." });
+    
+    try {
+      const userDir = path.join(ROOT, String(chatId));
+      if (fs.existsSync(userDir)) {
+        fs.rmSync(userDir, { recursive: true, force: true });
       }
-    } else {
-      pairsToUse.push(...pairs);
+      
+      state.set(chatId, { pairs: [], fronts: [], backs: [], sequence: 0, currentGroup: 0, imageGroups: [[]] });
+      await bot.sendMessage(chatId, "✅ Reset done. Your data cleared.\n\nSend new images to start over!");
+    } catch (e) {
+      await bot.sendMessage(chatId, `⚠️ Reset failed: ${e.message}`);
     }
-
-    const outPdf = path.join(jobDir, "pub_exact_layout.pdf");
+  } else if (data === "pdf_normal" || data === "pdf_flip") {
+    const flipImages = data === "pdf_flip";
     
-    // Use multi-ID function for automatic grid layout
-    await makeMultiIdPdf(pairsToUse, outPdf);
-
-    await bot.sendDocument(chatId, outPdf, {}, { filename: `pub_${pairs.length}ids.pdf` });
-    await bot.sendMessage(chatId, `✅ PDF generated with ${pairs.length} ID(s).`);
+    // Answer callback to remove loading state
+    await bot.answerCallbackQuery(query.id, { text: `Generating ${flipImages ? 'flipped' : 'normal'} PDF...` });
     
-    // Clear after successful generation
-    st.fronts = [];
-    st.backs = [];
-    st.imageGroups = [[]];
-    st.currentGroup = 0;
-  } catch (e) {
-    await bot.sendMessage(chatId, `Failed: ${e.message}`);
+    const pairs = st.pendingPairs || [];
+    if (pairs.length === 0) {
+      await bot.sendMessage(chatId, "⚠️ No images found. Please send images again and use /pdf.");
+      return;
+    }
+    
+    const jobDir = path.join(ROOT, String(chatId), uuidv4());
+    ensureDir(jobDir);
+
+    try {
+      const pairsToUse = [];
+
+      // Optional labels (keep OFF to preserve zero changes)
+      if (STAMP_LABELS) {
+        for (let i = 0; i < pairs.length; i++) {
+          const f = path.join(jobDir, `front_${i}_labeled.png`);
+          const b = path.join(jobDir, `back_${i}_labeled.png`);
+          await stampLabel(pairs[i].front, "FRONT", f);
+          await stampLabel(pairs[i].back, "BACK", b);
+          pairsToUse.push({ front: f, back: b });
+        }
+      } else {
+        pairsToUse.push(...pairs);
+      }
+
+      const outPdf = path.join(jobDir, "pub_exact_layout.pdf");
+      
+      // Use multi-ID function with flip option
+      await makeMultiIdPdf(pairsToUse, outPdf, flipImages);
+
+      await bot.sendDocument(chatId, outPdf, {}, { filename: `pub_${pairs.length}ids_${flipImages ? 'flipped' : 'normal'}.pdf` });
+      
+      // Show success message with reset button
+      const resetKeyboard = {
+        inline_keyboard: [
+          [
+            { text: "🔄 Reset & Start Over", callback_data: "user_reset" }
+          ]
+        ]
+      };
+      
+      await bot.sendMessage(
+        chatId,
+        `✅ PDF generated with ${pairs.length} ID(s) (${flipImages ? 'Flipped' : 'Normal'}).`,
+        { reply_markup: resetKeyboard }
+      );
+      
+      // Clear after successful generation
+      st.fronts = [];
+      st.backs = [];
+      st.imageGroups = [[]];
+      st.currentGroup = 0;
+      st.pendingPairs = null;
+    } catch (e) {
+      await bot.sendMessage(chatId, `Failed: ${e.message}`);
+    }
   }
 });
 

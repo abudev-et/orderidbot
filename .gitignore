@@ -3,3 +3,25 @@
 
 # Ignore Node.js modules
 node_modules/
+
+# Ignore user data and uploads
+data/
+
+# Ignore PM2 logs
+logs/
+*.log
+
+# Ignore PM2 runtime files
+.pm2/
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore temporary files
+*.tmp
+*.temp
