@@ -9,6 +9,11 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+// Configure sharp for low memory usage on shared hosting
+sharp.cache(false);
+sharp.concurrency(1);
+sharp.simd(false);
+
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const STAMP_LABELS = String(process.env.STAMP_LABELS || "false").toLowerCase() === "true";
 const ADMIN_ID = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID) : null;
