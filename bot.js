@@ -114,15 +114,17 @@ async function stampLabel(inputImgPath, labelText, outPath) {
 
 // Layout with exact measurements from PUB template
 // Page: 8.268" × 11.693" (595.30 × 841.90 points)
-// Image size: 3.32" × 1.99" (239.04 × 143.28 points)
+// Back size: 3.40" x 2.20" (244.80 x 158.40 points)
+// Front size: +2.4mm on both dimensions (251.60 x 165.20 points)
+// Front/back horizontal gap: 8mm (22.68 points)
 // Front: at horizontal=0.669", vertical=0.296"
 // Back: at horizontal=4.22", vertical=0.302"
 // Conversion: 1 inch = 72 points
 const LAYOUT = {
   pageWpt: 595.30,
   pageHpt: 841.90,
-  frontBox: { x: 48.17, y: 21.31, w: 239.04, h: 143.28 },
-  backBox: { x: 303.84, y: 21.74, w: 239.04, h: 143.28 }
+  frontBox: { x: 44.77, y: 0, w: 251.60, h: 165.20 },
+  backBox: { x: 319.05, y: 0, w: 244.80, h: 158.40 }
 };
 
 /* ==================================
@@ -145,14 +147,14 @@ async function makeSinglePagePdf(frontImg, backImg, outPdf) {
       doc.image(frontImg, LAYOUT.frontBox.x, LAYOUT.frontBox.y, {
         fit: [LAYOUT.frontBox.w, LAYOUT.frontBox.h],
         align: "center",
-        valign: "center"
+        valign: "top"
       });
 
       // BACK in measured backBox
       doc.image(backImg, LAYOUT.backBox.x, LAYOUT.backBox.y, {
         fit: [LAYOUT.backBox.w, LAYOUT.backBox.h],
         align: "center",
-        valign: "center"
+        valign: "top"
       });
 
       doc.end();
@@ -180,20 +182,14 @@ async function makeMultiIdPdf(pairs, outPdf, flipImages = false) {
       // All IDs use single column layout (vertical stack)
       const cols = 1;
 
-      // Horizontal positions: front x=0.66", back x=4.23"
-      // Conversion: 1 inch = 72 points
-      const firstFrontX = 47.52;  // 0.66"
-      const firstBackX = 304.56;   // 4.23"
+      const firstFrontX = LAYOUT.frontBox.x;
+      const firstBackX = LAYOUT.backBox.x;
+      const backYOffset = 0;
       
-      // Vertical positions for each row (exact measurements from PUB)
-      // ID1: 0.3", ID2: 2.47", ID3: 4.77", ID4: 7.13", ID5: 9.43"
-      const verticalPositions = [
-        21.6,   // 0.3"
-        177.84, // 2.47"
-        343.44, // 4.77"
-        513.36, // 7.13"
-        678.96  // 9.43"
-      ];
+      // Row spacing: first row at top (0mm), 1.41mm vertical gap between rows
+      const rowGap = 1.41 * 72 / 25.4;
+      const rowStep = LAYOUT.backBox.h + rowGap;
+      const verticalPositions = Array.from({ length: 5 }, (_, i) => i * rowStep);
       const horizontalSpacing = LAYOUT.pageWpt / cols;
 
       for (let i = 0; i < count; i++) {
@@ -206,38 +202,40 @@ async function makeMultiIdPdf(pairs, outPdf, flipImages = false) {
         // Use absolute positions with column offset
         const frontX = firstFrontX + (col * horizontalSpacing);
         const backX = firstBackX + (col * horizontalSpacing);
-        const yPos = verticalPositions[row] || verticalPositions[verticalPositions.length - 1];
+        const topY = verticalPositions[row] ?? verticalPositions[verticalPositions.length - 1];
+        const frontY = topY;
+        const backY = topY + backYOffset;
 
         // FRONT
         const frontOptions = {
           fit: [LAYOUT.frontBox.w, LAYOUT.frontBox.h],
           align: "center",
-          valign: "center"
+          valign: "top"
         };
         if (flipImages) {
           doc.save();
-          doc.translate(frontX + LAYOUT.frontBox.w, yPos);
+          doc.translate(frontX + LAYOUT.frontBox.w, frontY);
           doc.scale(-1, 1);  // Flip horizontally
           doc.image(pairs[i].front, 0, 0, frontOptions);
           doc.restore();
         } else {
-          doc.image(pairs[i].front, frontX, yPos, frontOptions);
+          doc.image(pairs[i].front, frontX, frontY, frontOptions);
         }
 
         // BACK
         const backOptions = {
           fit: [LAYOUT.backBox.w, LAYOUT.backBox.h],
           align: "center",
-          valign: "center"
+          valign: "top"
         };
         if (flipImages) {
           doc.save();
-          doc.translate(backX + LAYOUT.backBox.w, yPos);
+          doc.translate(backX + LAYOUT.backBox.w, backY);
           doc.scale(-1, 1);  // Flip horizontally
           doc.image(pairs[i].back, 0, 0, backOptions);
           doc.restore();
         } else {
-          doc.image(pairs[i].back, backX, yPos, backOptions);
+          doc.image(pairs[i].back, backX, backY, backOptions);
         }
       }
 
