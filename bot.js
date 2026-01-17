@@ -32,22 +32,92 @@ fs.mkdirSync(ROOT, { recursive: true });
  * In-memory state per chat:
  * {
  *   lastImagePath?: string,
+ *   lastImageOrder?: number,
+ *   pendingImages?: Array<{path: string, seq: number, ready?: boolean}>,
  *   fronts?: Array<{path: string, seq: number}>,
  *   backs?: Array<{path: string, seq: number}>,
  *   pairs?: Array<{front: string, back: string}>,
- *   sequence?: number,
  *   currentGroup?: number,
- *   imageGroups?: Array<Array<{path: string, type: string, seq: number}>>
+ *   imageGroups?: Array<Array<{path: string, type: string, seq: number}>> // seq is message order
  * }
  */
 const state = new Map();
 function getState(chatId) {
-  if (!state.has(chatId)) state.set(chatId, { pairs: [], fronts: [], backs: [], sequence: 0, currentGroup: 0, imageGroups: [[]] });
+  if (!state.has(chatId)) {
+    state.set(chatId, {
+      pairs: [],
+      fronts: [],
+      backs: [],
+      currentGroup: 0,
+      imageGroups: [[]],
+      lastImagePath: null,
+      lastImageOrder: null,
+      pendingImages: []
+    });
+  }
   return state.get(chatId);
 }
 
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
+}
+
+function queuePendingImage(st, imgPath, order, downloadPromise) {
+  if (!st.pendingImages) st.pendingImages = [];
+  const item = { path: imgPath, seq: order, ready: false, promise: null };
+  if (downloadPromise) {
+    item.promise = downloadPromise.then(() => {
+      item.ready = true;
+      return imgPath;
+    });
+  } else {
+    item.ready = true;
+  }
+  st.pendingImages.push(item);
+  st.pendingImages.sort((a, b) => a.seq - b.seq);
+  return item;
+}
+
+async function takePendingImage(st) {
+  if (!st.pendingImages || st.pendingImages.length === 0) return null;
+  st.pendingImages.sort((a, b) => a.seq - b.seq);
+  const item = st.pendingImages[0];
+  if (!item.ready && item.promise) {
+    try {
+      await item.promise;
+    } catch (e) {
+      st.pendingImages.shift();
+      return null;
+    }
+  }
+  if (!item.ready) return null;
+  st.pendingImages.shift();
+  return item;
+}
+
+function addLabeledImage(st, type, imgPath, order) {
+  if (!st.fronts) st.fronts = [];
+  if (!st.backs) st.backs = [];
+  const list = type === "front" ? st.fronts : st.backs;
+  list.push({ path: imgPath, seq: order });
+
+  const groupIdx = st.currentGroup || 0;
+  if (!st.imageGroups) st.imageGroups = [[]];
+  if (!st.imageGroups[groupIdx]) st.imageGroups[groupIdx] = [];
+  st.imageGroups[groupIdx].push({ path: imgPath, type, seq: order });
+
+  if (st.lastImagePath === imgPath) {
+    st.lastImagePath = null;
+    st.lastImageOrder = null;
+  }
+
+  return { frontCount: st.fronts.length, backCount: st.backs.length };
+}
+
+function queueLabel(st, fn) {
+  const run = () => Promise.resolve().then(fn);
+  st.labelLock = (st.labelLock || Promise.resolve()).then(run, run);
+  return st.labelLock;
 }
 
 function run(cmd, args, opts = {}) {
@@ -254,7 +324,16 @@ async function makeMultiIdPdf(pairs, outPdf, flipImages = false) {
 
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
-  state.set(chatId, { pairs: [], fronts: [], backs: [], sequence: 0, currentGroup: 0, imageGroups: [[]] });
+  state.set(chatId, {
+    pairs: [],
+    fronts: [],
+    backs: [],
+    currentGroup: 0,
+    imageGroups: [[]],
+    lastImagePath: null,
+    lastImageOrder: null,
+    pendingImages: []
+  });
   await bot.sendMessage(
     chatId,
     [
@@ -315,7 +394,16 @@ bot.onText(/\/reset/, async (msg) => {
         fs.rmSync(userDir, { recursive: true, force: true });
       }
       
-      state.set(chatId, { pairs: [], fronts: [], backs: [], sequence: 0, currentGroup: 0, imageGroups: [[]] });
+      state.set(chatId, {
+        pairs: [],
+        fronts: [],
+        backs: [],
+        currentGroup: 0,
+        imageGroups: [[]],
+        lastImagePath: null,
+        lastImageOrder: null,
+        pendingImages: []
+      });
       await bot.sendMessage(chatId, "✅ Reset done. Your data cleared.");
     } catch (e) {
       await bot.sendMessage(chatId, `⚠️ Reset failed: ${e.message}`);
@@ -361,47 +449,37 @@ bot.onText(/\/status/, async (msg) => {
 bot.onText(/\/front/, async (msg) => {
   const chatId = msg.chat.id;
   const st = getState(chatId);
-  if (!st.lastImagePath) return bot.sendMessage(chatId, "Send an image first, then /front.");
-  
-  if (!st.fronts) st.fronts = [];
-  if (st.fronts.length >= 5) {
-    return bot.sendMessage(chatId, "⚠️ Maximum 5 FRONT images reached.");
-  }
-  
-  st.sequence = (st.sequence || 0) + 1;
-  st.fronts.push({ path: st.lastImagePath, seq: st.sequence });
-  
-  const groupIdx = st.currentGroup || 0;
-  if (!st.imageGroups) st.imageGroups = [[]];
-  if (!st.imageGroups[groupIdx]) st.imageGroups[groupIdx] = [];
-  st.imageGroups[groupIdx].push({ path: st.lastImagePath, type: 'front', seq: st.sequence });
-  
-  const frontCount = st.fronts.length;
-  const backCount = st.backs?.length || 0;
-  await bot.sendMessage(chatId, `✅ FRONT #${frontCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
+  await queueLabel(st, async () => {
+    if ((st.fronts?.length || 0) >= 5) {
+      return bot.sendMessage(chatId, "?s??,? Maximum 5 FRONT images reached.");
+    }
+
+    const img = await takePendingImage(st);
+    if (!img) return bot.sendMessage(chatId, "Send an image first, then /front.");
+
+    const counts = addLabeledImage(st, "front", img.path, img.seq);
+    const frontCount = counts.frontCount;
+    const backCount = counts.backCount;
+    await bot.sendMessage(chatId, `?o. FRONT #${frontCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
+  });
 });
 
 bot.onText(/\/back/, async (msg) => {
   const chatId = msg.chat.id;
   const st = getState(chatId);
-  if (!st.lastImagePath) return bot.sendMessage(chatId, "Send an image first, then /back.");
-  
-  if (!st.backs) st.backs = [];
-  if (st.backs.length >= 5) {
-    return bot.sendMessage(chatId, "⚠️ Maximum 5 BACK images reached.");
-  }
-  
-  st.sequence = (st.sequence || 0) + 1;
-  st.backs.push({ path: st.lastImagePath, seq: st.sequence });
-  
-  const groupIdx = st.currentGroup || 0;
-  if (!st.imageGroups) st.imageGroups = [[]];
-  if (!st.imageGroups[groupIdx]) st.imageGroups[groupIdx] = [];
-  st.imageGroups[groupIdx].push({ path: st.lastImagePath, type: 'back', seq: st.sequence });
-  
-  const frontCount = st.fronts?.length || 0;
-  const backCount = st.backs.length;
-  await bot.sendMessage(chatId, `✅ BACK #${backCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
+  await queueLabel(st, async () => {
+    if ((st.backs?.length || 0) >= 5) {
+      return bot.sendMessage(chatId, "?s??,? Maximum 5 BACK images reached.");
+    }
+
+    const img = await takePendingImage(st);
+    if (!img) return bot.sendMessage(chatId, "Send an image first, then /back.");
+
+    const counts = addLabeledImage(st, "back", img.path, img.seq);
+    const frontCount = counts.frontCount;
+    const backCount = counts.backCount;
+    await bot.sendMessage(chatId, `?o. BACK #${backCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
+  });
 });
 
 bot.onText(/\/pdf/, async (msg) => {
@@ -410,7 +488,7 @@ bot.onText(/\/pdf/, async (msg) => {
 
   const groups = st.imageGroups || [[]];
   
-  // Collect all images from all groups and sort by sequence
+  // Collect all images from all groups and sort by message order
   const allImages = [];
   for (const group of groups) {
     if (group && group.length > 0) {
@@ -423,7 +501,7 @@ bot.onText(/\/pdf/, async (msg) => {
     return;
   }
   
-  // Sort all images by sequence number (order received)
+  // Sort all images by message order (avoids async download reordering)
   allImages.sort((a, b) => a.seq - b.seq);
   
   // Separate into fronts and backs while maintaining order
@@ -481,7 +559,16 @@ bot.on("callback_query", async (query) => {
         fs.rmSync(userDir, { recursive: true, force: true });
       }
       
-      state.set(chatId, { pairs: [], fronts: [], backs: [], sequence: 0, currentGroup: 0, imageGroups: [[]] });
+      state.set(chatId, {
+        pairs: [],
+        fronts: [],
+        backs: [],
+        currentGroup: 0,
+        imageGroups: [[]],
+        lastImagePath: null,
+        lastImageOrder: null,
+        pendingImages: []
+      });
       await bot.sendMessage(chatId, "✅ Reset done. Your data cleared.\n\nSend new images to start over!");
     } catch (e) {
       await bot.sendMessage(chatId, `⚠️ Reset failed: ${e.message}`);
@@ -545,6 +632,9 @@ bot.on("callback_query", async (query) => {
       st.imageGroups = [[]];
       st.currentGroup = 0;
       st.pendingPairs = null;
+      st.lastImagePath = null;
+      st.lastImageOrder = null;
+      st.pendingImages = [];
     } catch (e) {
       await bot.sendMessage(chatId, `Failed: ${e.message}`);
     }
@@ -554,7 +644,8 @@ bot.on("callback_query", async (query) => {
 // Tagging by text: "front" / "back" or any text as separator
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
-  const text = (msg.text || "").trim().toLowerCase();
+  if (typeof msg.text !== "string") return;
+  const text = msg.text.trim().toLowerCase();
   
   // If not a command and not front/back, treat as separator
   if (!text.startsWith('/') && text !== "front" && text !== "back") {
@@ -571,42 +662,37 @@ bot.on("message", async (msg) => {
   if (text !== "front" && text !== "back") return;
 
   const st = getState(chatId);
-  if (!st.lastImagePath) return bot.sendMessage(chatId, "Send an image first, then type front/back.");
 
   if (text === "front") {
-    if (!st.fronts) st.fronts = [];
-    if (st.fronts.length >= 5) {
-      return bot.sendMessage(chatId, "⚠️ Maximum 5 FRONT images reached.");
-    }
-    st.sequence = (st.sequence || 0) + 1;
-    st.fronts.push({ path: st.lastImagePath, seq: st.sequence });
-    
-    const groupIdx = st.currentGroup || 0;
-    if (!st.imageGroups) st.imageGroups = [[]];
-    if (!st.imageGroups[groupIdx]) st.imageGroups[groupIdx] = [];
-    st.imageGroups[groupIdx].push({ path: st.lastImagePath, type: 'front', seq: st.sequence });
-    
-    const frontCount = st.fronts.length;
-    const backCount = st.backs?.length || 0;
-    await bot.sendMessage(chatId, `✅ FRONT #${frontCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
+    await queueLabel(st, async () => {
+      if ((st.fronts?.length || 0) >= 5) {
+        return bot.sendMessage(chatId, "?s??,? Maximum 5 FRONT images reached.");
+      }
+
+      const img = await takePendingImage(st);
+      if (!img) return bot.sendMessage(chatId, "Send an image first, then type front/back.");
+
+      const counts = addLabeledImage(st, "front", img.path, img.seq);
+      const frontCount = counts.frontCount;
+      const backCount = counts.backCount;
+      await bot.sendMessage(chatId, `?o. FRONT #${frontCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
+    });
   }
   
   if (text === "back") {
-    if (!st.backs) st.backs = [];
-    if (st.backs.length >= 5) {
-      return bot.sendMessage(chatId, "⚠️ Maximum 5 BACK images reached.");
-    }
-    st.sequence = (st.sequence || 0) + 1;
-    st.backs.push({ path: st.lastImagePath, seq: st.sequence });
-    
-    const groupIdx = st.currentGroup || 0;
-    if (!st.imageGroups) st.imageGroups = [[]];
-    if (!st.imageGroups[groupIdx]) st.imageGroups[groupIdx] = [];
-    st.imageGroups[groupIdx].push({ path: st.lastImagePath, type: 'back', seq: st.sequence });
-    
-    const frontCount = st.fronts?.length || 0;
-    const backCount = st.backs.length;
-    await bot.sendMessage(chatId, `✅ BACK #${backCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
+    await queueLabel(st, async () => {
+      if ((st.backs?.length || 0) >= 5) {
+        return bot.sendMessage(chatId, "?s??,? Maximum 5 BACK images reached.");
+      }
+
+      const img = await takePendingImage(st);
+      if (!img) return bot.sendMessage(chatId, "Send an image first, then type front/back.");
+
+      const counts = addLabeledImage(st, "back", img.path, img.seq);
+      const frontCount = counts.frontCount;
+      const backCount = counts.backCount;
+      await bot.sendMessage(chatId, `?o. BACK #${backCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
+    });
   }
 });
 
@@ -624,45 +710,38 @@ bot.on("photo", async (msg) => {
 
   const imgPath = path.join(userDir, `upload_${Date.now()}.jpg`);
   try {
-    await downloadTelegramFile(best.file_id, imgPath);
+    const order = msg.message_id ?? Date.now();
+    const caption = (msg.caption || "").toLowerCase();
+    const downloadPromise = downloadTelegramFile(best.file_id, imgPath);
+    let pending = null;
+    if (!caption.includes("front") && !caption.includes("back")) {
+      pending = queuePendingImage(st, imgPath, order, downloadPromise);
+    }
+
+    await downloadPromise;
     st.lastImagePath = imgPath;
+    st.lastImageOrder = order;
     
     // Check if caption contains front/back indicator
-    const caption = (msg.caption || "").toLowerCase();
-    
+
     if (caption.includes("front")) {
-      if (!st.fronts) st.fronts = [];
-      if (st.fronts.length >= 5) {
-        return bot.sendMessage(chatId, "⚠️ Maximum 5 FRONT images reached.");
+      if ((st.fronts?.length || 0) >= 5) {
+        return bot.sendMessage(chatId, "?s??,? Maximum 5 FRONT images reached.");
       }
-      st.sequence = (st.sequence || 0) + 1;
-      st.fronts.push({ path: imgPath, seq: st.sequence });
-      
-      const groupIdx = st.currentGroup || 0;
-      if (!st.imageGroups) st.imageGroups = [[]];
-      if (!st.imageGroups[groupIdx]) st.imageGroups[groupIdx] = [];
-      st.imageGroups[groupIdx].push({ path: imgPath, type: 'front', seq: st.sequence });
-      
-      const frontCount = st.fronts.length;
-      const backCount = st.backs?.length || 0;
-      await bot.sendMessage(chatId, `✅ FRONT #${frontCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
+      const counts = addLabeledImage(st, "front", imgPath, order);
+      const frontCount = counts.frontCount;
+      const backCount = counts.backCount;
+      await bot.sendMessage(chatId, `?o. FRONT #${frontCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
     } else if (caption.includes("back")) {
-      if (!st.backs) st.backs = [];
-      if (st.backs.length >= 5) {
-        return bot.sendMessage(chatId, "⚠️ Maximum 5 BACK images reached.");
+      if ((st.backs?.length || 0) >= 5) {
+        return bot.sendMessage(chatId, "?s??,? Maximum 5 BACK images reached.");
       }
-      st.sequence = (st.sequence || 0) + 1;
-      st.backs.push({ path: imgPath, seq: st.sequence });
-      
-      const groupIdx = st.currentGroup || 0;
-      if (!st.imageGroups) st.imageGroups = [[]];
-      if (!st.imageGroups[groupIdx]) st.imageGroups[groupIdx] = [];
-      st.imageGroups[groupIdx].push({ path: imgPath, type: 'back', seq: st.sequence });
-      
-      const frontCount = st.fronts?.length || 0;
-      const backCount = st.backs.length;
-      await bot.sendMessage(chatId, `✅ BACK #${backCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
+      const counts = addLabeledImage(st, "back", imgPath, order);
+      const frontCount = counts.frontCount;
+      const backCount = counts.backCount;
+      await bot.sendMessage(chatId, `?o. BACK #${backCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
     } else {
+      if (pending) pending.ready = true;
       await bot.sendMessage(chatId, `Image received. Add caption 'Front' or 'Back', or type front/back.`);
     }
   } catch (e) {
@@ -691,11 +770,40 @@ bot.on("document", async (msg) => {
 
   const outPath = path.join(userDir, `${Date.now()}_${path.basename(filename)}`);
   try {
-    await downloadTelegramFile(doc.file_id, outPath);
+    const order = msg.message_id ?? Date.now();
+    const caption = (msg.caption || "").toLowerCase();
+    const downloadPromise = downloadTelegramFile(doc.file_id, outPath);
+
+    let pending = null;
+    if (!caption.includes("front") && !caption.includes("back")) {
+      pending = queuePendingImage(st, outPath, order, downloadPromise);
+    }
+
+    await downloadPromise;
     st.lastImagePath = outPath;
-    const frontCount = st.fronts?.length || 0;
-    const backCount = st.backs?.length || 0;
-    await bot.sendMessage(chatId, `Image received. Type 'front' or 'back' (or /front /back). Current: ${frontCount} fronts, ${backCount} backs.`);
+    st.lastImageOrder = order;
+    if (caption.includes("front")) {
+      if ((st.fronts?.length || 0) >= 5) {
+        return bot.sendMessage(chatId, "?s??,? Maximum 5 FRONT images reached.");
+      }
+      const counts = addLabeledImage(st, "front", outPath, order);
+      const frontCount = counts.frontCount;
+      const backCount = counts.backCount;
+      await bot.sendMessage(chatId, `?o. FRONT #${frontCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
+    } else if (caption.includes("back")) {
+      if ((st.backs?.length || 0) >= 5) {
+        return bot.sendMessage(chatId, "?s??,? Maximum 5 BACK images reached.");
+      }
+      const counts = addLabeledImage(st, "back", outPath, order);
+      const frontCount = counts.frontCount;
+      const backCount = counts.backCount;
+      await bot.sendMessage(chatId, `?o. BACK #${backCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
+    } else {
+      if (pending) pending.ready = true;
+      const frontCount = st.fronts?.length || 0;
+      const backCount = st.backs?.length || 0;
+      await bot.sendMessage(chatId, `Image received. Type 'front' or 'back' (or /front /back). Current: ${frontCount} fronts, ${backCount} backs.`);
+    }
   } catch (e) {
     await bot.sendMessage(chatId, `Download failed: ${e.message}. Please try sending the image again.`);
   }
