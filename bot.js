@@ -27,6 +27,41 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 const ROOT = path.resolve("./data");
 fs.mkdirSync(ROOT, { recursive: true });
+const KNOWN_CHATS_FILE = path.join(ROOT, "known_chats.json");
+const knownChats = new Set();
+
+function loadKnownChats() {
+  if (!fs.existsSync(KNOWN_CHATS_FILE)) return;
+  try {
+    const raw = fs.readFileSync(KNOWN_CHATS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      for (const id of parsed) {
+        if (Number.isInteger(id)) knownChats.add(id);
+      }
+    }
+  } catch (e) {
+    console.error(`Failed to load known chats: ${e.message}`);
+  }
+}
+
+function persistKnownChats() {
+  try {
+    const sorted = Array.from(knownChats).sort((a, b) => a - b);
+    fs.writeFileSync(KNOWN_CHATS_FILE, JSON.stringify(sorted, null, 2));
+  } catch (e) {
+    console.error(`Failed to save known chats: ${e.message}`);
+  }
+}
+
+function registerChatId(chatId) {
+  if (!Number.isInteger(chatId)) return;
+  if (knownChats.has(chatId)) return;
+  knownChats.add(chatId);
+  persistKnownChats();
+}
+
+loadKnownChats();
 
 /**
  * In-memory state per chat:
@@ -52,7 +87,8 @@ function getState(chatId) {
       imageGroups: [[]],
       lastImagePath: null,
       lastImageOrder: null,
-      pendingImages: []
+      pendingImages: [],
+      awaitingNews: false
     });
   }
   return state.get(chatId);
@@ -127,6 +163,48 @@ function run(cmd, args, opts = {}) {
       resolve({ stdout, stderr });
     });
   });
+}
+
+function buildPairsFromGroups(groups, maxPairs = 5) {
+  const pairs = [];
+  let incompleteGroups = 0;
+  const safeGroups = Array.isArray(groups) ? groups : [];
+
+  for (const group of safeGroups) {
+    if (!group || group.length === 0) continue;
+
+    const sorted = [...group].sort((a, b) => a.seq - b.seq);
+    const fronts = sorted.filter((img) => img.type === "front");
+    const backs = sorted.filter((img) => img.type === "back");
+    const groupPairs = Math.min(fronts.length, backs.length);
+
+    if (fronts.length !== backs.length) incompleteGroups += 1;
+
+    for (let i = 0; i < groupPairs && pairs.length < maxPairs; i++) {
+      pairs.push({ front: fronts[i].path, back: backs[i].path });
+    }
+
+    if (pairs.length >= maxPairs) break;
+  }
+
+  return { pairs, incompleteGroups };
+}
+
+async function broadcastNews(message) {
+  const chatIds = Array.from(knownChats);
+  let sent = 0;
+  let failed = 0;
+
+  for (const id of chatIds) {
+    try {
+      await bot.sendMessage(id, message);
+      sent += 1;
+    } catch (e) {
+      failed += 1;
+    }
+  }
+
+  return { sent, failed, total: chatIds.length };
 }
 
 async function downloadTelegramFile(fileId, outPath, maxRetries = 3) {
@@ -324,6 +402,7 @@ async function makeMultiIdPdf(pairs, outPdf, flipImages = false) {
 
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
+  registerChatId(chatId);
   state.set(chatId, {
     pairs: [],
     fronts: [],
@@ -332,7 +411,8 @@ bot.onText(/\/start/, async (msg) => {
     imageGroups: [[]],
     lastImagePath: null,
     lastImageOrder: null,
-    pendingImages: []
+    pendingImages: [],
+    awaitingNews: false
   });
   await bot.sendMessage(
     chatId,
@@ -369,6 +449,7 @@ bot.onText(/\/start/, async (msg) => {
 bot.onText(/\/reset/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
+  registerChatId(chatId);
   
   // Check if user is admin
   if (ADMIN_ID && userId === ADMIN_ID) {
@@ -381,6 +462,8 @@ bot.onText(/\/reset/, async (msg) => {
       
       // Clear all chat states
       state.clear();
+      knownChats.clear();
+      persistKnownChats();
       
       await bot.sendMessage(chatId, "🔐 Admin Reset: All data deleted from server.");
     } catch (e) {
@@ -402,7 +485,8 @@ bot.onText(/\/reset/, async (msg) => {
         imageGroups: [[]],
         lastImagePath: null,
         lastImageOrder: null,
-        pendingImages: []
+        pendingImages: [],
+        awaitingNews: false
       });
       await bot.sendMessage(chatId, "✅ Reset done. Your data cleared.");
     } catch (e) {
@@ -413,6 +497,7 @@ bot.onText(/\/reset/, async (msg) => {
 
 bot.onText(/\/next/, async (msg) => {
   const chatId = msg.chat.id;
+  registerChatId(chatId);
   const st = getState(chatId);
   st.currentGroup = (st.currentGroup || 0) + 1;
   if (!st.imageGroups[st.currentGroup]) {
@@ -423,6 +508,7 @@ bot.onText(/\/next/, async (msg) => {
 
 bot.onText(/\/status/, async (msg) => {
   const chatId = msg.chat.id;
+  registerChatId(chatId);
   const st = getState(chatId);
   
   const groups = st.imageGroups || [[]];
@@ -448,6 +534,7 @@ bot.onText(/\/status/, async (msg) => {
 
 bot.onText(/\/front/, async (msg) => {
   const chatId = msg.chat.id;
+  registerChatId(chatId);
   const st = getState(chatId);
   await queueLabel(st, async () => {
     if ((st.fronts?.length || 0) >= 5) {
@@ -466,6 +553,7 @@ bot.onText(/\/front/, async (msg) => {
 
 bot.onText(/\/back/, async (msg) => {
   const chatId = msg.chat.id;
+  registerChatId(chatId);
   const st = getState(chatId);
   await queueLabel(st, async () => {
     if ((st.backs?.length || 0) >= 5) {
@@ -484,39 +572,11 @@ bot.onText(/\/back/, async (msg) => {
 
 bot.onText(/\/pdf/, async (msg) => {
   const chatId = msg.chat.id;
+  registerChatId(chatId);
   const st = getState(chatId);
 
   const groups = st.imageGroups || [[]];
-  
-  // Collect all images from all groups and sort by message order
-  const allImages = [];
-  for (const group of groups) {
-    if (group && group.length > 0) {
-      allImages.push(...group);
-    }
-  }
-  
-  if (allImages.length === 0) {
-    await bot.sendMessage(chatId, "I need at least one complete ID (1 front + 1 back). Send images and mark them as front/back.");
-    return;
-  }
-  
-  // Sort all images by message order (avoids async download reordering)
-  allImages.sort((a, b) => a.seq - b.seq);
-  
-  // Separate into fronts and backs while maintaining order
-  const allFronts = allImages.filter(img => img.type === 'front');
-  const allBacks = allImages.filter(img => img.type === 'back');
-  
-  // Pair them: 1st front with 1st back, 2nd front with 2nd back, etc.
-  const pairCount = Math.min(allFronts.length, allBacks.length, 5);
-  const pairs = [];
-  for (let i = 0; i < pairCount; i++) {
-    pairs.push({
-      front: allFronts[i].path,
-      back: allBacks[i].path
-    });
-  }
+  const { pairs, incompleteGroups } = buildPairsFromGroups(groups, 5);
   
   if (pairs.length === 0) {
     await bot.sendMessage(chatId, "I need at least one complete ID (1 front + 1 back). Send images and mark them as front/back.");
@@ -538,14 +598,38 @@ bot.onText(/\/pdf/, async (msg) => {
   
   await bot.sendMessage(
     chatId,
-    `📋 Ready to generate PDF with ${pairs.length} ID(s).\n\nChoose orientation:`,
+    `📋 Ready to generate PDF with ${pairs.length} ID(s).${incompleteGroups ? " Incomplete groups were skipped." : ""}\n\nChoose orientation:`,
     { reply_markup: keyboard }
   );
+});
+
+bot.onText(/\/news(?:\s+([\s\S]+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  registerChatId(chatId);
+
+  if (!ADMIN_ID || userId !== ADMIN_ID) {
+    await bot.sendMessage(chatId, "Not authorized.");
+    return;
+  }
+
+  const text = match?.[1]?.trim() || "";
+  const st = getState(chatId);
+
+  if (!text) {
+    st.awaitingNews = true;
+    await bot.sendMessage(chatId, "Send the news text to broadcast, or /cancel.");
+    return;
+  }
+
+  const result = await broadcastNews(text);
+  await bot.sendMessage(chatId, `News sent to ${result.sent}/${result.total}. Failed: ${result.failed}.`);
 });
 
 // Handle button callbacks for PDF orientation
 bot.on("callback_query", async (query) => {
   const chatId = query.message.chat.id;
+  registerChatId(chatId);
   const data = query.data;
   const st = getState(chatId);
   
@@ -567,7 +651,8 @@ bot.on("callback_query", async (query) => {
         imageGroups: [[]],
         lastImagePath: null,
         lastImageOrder: null,
-        pendingImages: []
+        pendingImages: [],
+        awaitingNews: false
       });
       await bot.sendMessage(chatId, "✅ Reset done. Your data cleared.\n\nSend new images to start over!");
     } catch (e) {
@@ -644,12 +729,30 @@ bot.on("callback_query", async (query) => {
 // Tagging by text: "front" / "back" or any text as separator
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
+  registerChatId(chatId);
   if (typeof msg.text !== "string") return;
-  const text = msg.text.trim().toLowerCase();
+  const rawText = msg.text.trim();
+  const text = rawText.toLowerCase();
+  const st = getState(chatId);
+
+  if (st.awaitingNews && msg.from?.id === ADMIN_ID) {
+    if (text === "/cancel") {
+      st.awaitingNews = false;
+      await bot.sendMessage(chatId, "News broadcast canceled.");
+      return;
+    }
+    if (text.startsWith("/")) {
+      await bot.sendMessage(chatId, "Send the news text to broadcast, or /cancel.");
+      return;
+    }
+    st.awaitingNews = false;
+    const result = await broadcastNews(rawText);
+    await bot.sendMessage(chatId, `News sent to ${result.sent}/${result.total}. Failed: ${result.failed}.`);
+    return;
+  }
   
   // If not a command and not front/back, treat as separator
   if (!text.startsWith('/') && text !== "front" && text !== "back") {
-    const st = getState(chatId);
     st.currentGroup = (st.currentGroup || 0) + 1;
     if (!st.imageGroups) st.imageGroups = [[]];
     if (!st.imageGroups[st.currentGroup]) {
@@ -660,8 +763,6 @@ bot.on("message", async (msg) => {
   }
   
   if (text !== "front" && text !== "back") return;
-
-  const st = getState(chatId);
 
   if (text === "front") {
     await queueLabel(st, async () => {
@@ -699,6 +800,7 @@ bot.on("message", async (msg) => {
 // Receive photos
 bot.on("photo", async (msg) => {
   const chatId = msg.chat.id;
+  registerChatId(chatId);
   const st = getState(chatId);
 
   const photos = msg.photo || [];
@@ -708,9 +810,9 @@ bot.on("photo", async (msg) => {
   const userDir = path.join(ROOT, String(chatId));
   ensureDir(userDir);
 
-  const imgPath = path.join(userDir, `upload_${Date.now()}.jpg`);
   try {
     const order = msg.message_id ?? Date.now();
+    const imgPath = path.join(userDir, `upload_${order}_${uuidv4()}.jpg`);
     const caption = (msg.caption || "").toLowerCase();
     const downloadPromise = downloadTelegramFile(best.file_id, imgPath);
     let pending = null;
@@ -752,6 +854,7 @@ bot.on("photo", async (msg) => {
 // Receive images as document
 bot.on("document", async (msg) => {
   const chatId = msg.chat.id;
+  registerChatId(chatId);
   const st = getState(chatId);
 
   const doc = msg.document;
@@ -768,9 +871,10 @@ bot.on("document", async (msg) => {
   const userDir = path.join(ROOT, String(chatId));
   ensureDir(userDir);
 
-  const outPath = path.join(userDir, `${Date.now()}_${path.basename(filename)}`);
   try {
     const order = msg.message_id ?? Date.now();
+    const safeName = path.basename(filename) || "upload";
+    const outPath = path.join(userDir, `${order}_${uuidv4()}_${safeName}`);
     const caption = (msg.caption || "").toLowerCase();
     const downloadPromise = downloadTelegramFile(doc.file_id, outPath);
 
