@@ -262,8 +262,8 @@ async function stampLabel(inputImgPath, labelText, outPath) {
 
 // Layout with exact measurements from PUB template
 // Page: 8.268" × 11.693" (595.30 × 841.90 points)
-// Back size: 3.40" x 2.20" (244.80 x 158.40 points)
-// Front size: +2.4mm on both dimensions (251.60 x 165.20 points)
+// Back size: 3.43" x 2.22" (246.96 x 159.84 points)
+// Front size: same as back (246.96 x 159.84 points)
 // Front/back horizontal gap: 8mm (22.68 points)
 // Front: at horizontal=0.669", vertical=0.296"
 // Back: at horizontal=4.22", vertical=0.302"
@@ -271,8 +271,8 @@ async function stampLabel(inputImgPath, labelText, outPath) {
 const LAYOUT = {
   pageWpt: 595.30,
   pageHpt: 841.90,
-  frontBox: { x: 44.77, y: 0, w: 251.60, h: 165.20 },
-  backBox: { x: 319.05, y: 0, w: 244.80, h: 158.40 }
+  frontBox: { x: 44.77, y: 0, w: 246.96, h: 159.84 },
+  backBox: { x: 319.05, y: 0, w: 246.96, h: 159.84 }
 };
 
 /* ==================================
@@ -293,16 +293,14 @@ async function makeSinglePagePdf(frontImg, backImg, outPdf) {
 
       // FRONT in measured frontBox
       doc.image(frontImg, LAYOUT.frontBox.x, LAYOUT.frontBox.y, {
-        fit: [LAYOUT.frontBox.w, LAYOUT.frontBox.h],
-        align: "center",
-        valign: "top"
+        width: LAYOUT.frontBox.w,
+        height: LAYOUT.frontBox.h
       });
 
       // BACK in measured backBox
       doc.image(backImg, LAYOUT.backBox.x, LAYOUT.backBox.y, {
-        fit: [LAYOUT.backBox.w, LAYOUT.backBox.h],
-        align: "center",
-        valign: "top"
+        width: LAYOUT.backBox.w,
+        height: LAYOUT.backBox.h
       });
 
       doc.end();
@@ -314,7 +312,7 @@ async function makeSinglePagePdf(frontImg, backImg, outPdf) {
   return outPdf;
 }
 
-async function makeMultiIdPdf(pairs, outPdf, flipImages = false) {
+async function makeMultiIdPdf(pairs, outPdf, flipImages = false, swapSides = false) {
   const doc = new PDFDocument({ autoFirstPage: false });
   const count = Math.min(pairs.length, 5);
 
@@ -330,14 +328,15 @@ async function makeMultiIdPdf(pairs, outPdf, flipImages = false) {
       // All IDs use single column layout (vertical stack)
       const cols = 1;
 
-      const firstFrontX = LAYOUT.frontBox.x;
-      const firstBackX = LAYOUT.backBox.x;
+      const firstFrontX = swapSides ? LAYOUT.backBox.x : LAYOUT.frontBox.x;
+      const firstBackX = swapSides ? LAYOUT.frontBox.x : LAYOUT.backBox.x;
       const backYOffset = 0;
       
-      // Row spacing: first row at top (0mm), 1.41mm vertical gap between rows
+      // Row spacing: first row at top with 21.3pt spacing, 1.41mm vertical gap between rows
+      const topMargin = 21.3;
       const rowGap = 1.41 * 72 / 25.4;
       const rowStep = LAYOUT.backBox.h + rowGap;
-      const verticalPositions = Array.from({ length: 5 }, (_, i) => i * rowStep);
+      const verticalPositions = Array.from({ length: 5 }, (_, i) => topMargin + (i * rowStep));
       const horizontalSpacing = LAYOUT.pageWpt / cols;
 
       for (let i = 0; i < count; i++) {
@@ -356,9 +355,8 @@ async function makeMultiIdPdf(pairs, outPdf, flipImages = false) {
 
         // FRONT
         const frontOptions = {
-          fit: [LAYOUT.frontBox.w, LAYOUT.frontBox.h],
-          align: "center",
-          valign: "top"
+          width: LAYOUT.frontBox.w,
+          height: LAYOUT.frontBox.h
         };
         if (flipImages) {
           doc.save();
@@ -372,9 +370,8 @@ async function makeMultiIdPdf(pairs, outPdf, flipImages = false) {
 
         // BACK
         const backOptions = {
-          fit: [LAYOUT.backBox.w, LAYOUT.backBox.h],
-          align: "center",
-          valign: "top"
+          width: LAYOUT.backBox.w,
+          height: LAYOUT.backBox.h
         };
         if (flipImages) {
           doc.save();
@@ -578,6 +575,13 @@ bot.onText(/\/pdf/, async (msg) => {
   const groups = st.imageGroups || [[]];
   const { pairs, incompleteGroups } = buildPairsFromGroups(groups, 5);
   
+  if (incompleteGroups > 0) {
+    await bot.sendMessage(
+      chatId,
+      "Front and back must be equal for each ID group. Please add the missing side(s) or /reset."
+    );
+    return;
+  }
   if (pairs.length === 0) {
     await bot.sendMessage(chatId, "I need at least one complete ID (1 front + 1 back). Send images and mark them as front/back.");
     return;
@@ -591,14 +595,17 @@ bot.onText(/\/pdf/, async (msg) => {
     inline_keyboard: [
       [
         { text: "📄 Normal", callback_data: "pdf_normal" },
-        { text: "🔄 Flip", callback_data: "pdf_flip" }
+        { text: "Reverse", callback_data: "pdf_reverse" }
+      ],
+      [
+        { text: "🔄 Flip + Reverse", callback_data: "pdf_flip" }
       ]
     ]
   };
   
   await bot.sendMessage(
     chatId,
-    `📋 Ready to generate PDF with ${pairs.length} ID(s).${incompleteGroups ? " Incomplete groups were skipped." : ""}\n\nChoose orientation:`,
+    `📋 Ready to generate PDF with ${pairs.length} ID(s).\n\nChoose orientation:\nNormal = front left, back right\nReverse = back left, front right\nFlip + Reverse = mirror images + swap sides`,
     { reply_markup: keyboard }
   );
 });
@@ -658,11 +665,13 @@ bot.on("callback_query", async (query) => {
     } catch (e) {
       await bot.sendMessage(chatId, `⚠️ Reset failed: ${e.message}`);
     }
-  } else if (data === "pdf_normal" || data === "pdf_flip") {
+  } else if (data === "pdf_normal" || data === "pdf_flip" || data === "pdf_reverse") {
     const flipImages = data === "pdf_flip";
+    const swapSides = data === "pdf_reverse" || data === "pdf_flip";
     
     // Answer callback to remove loading state
-    await bot.answerCallbackQuery(query.id, { text: `Generating ${flipImages ? 'flipped' : 'normal'} PDF...` });
+    const modeLabel = flipImages ? "flipped + reversed" : swapSides ? "reversed" : "normal";
+    await bot.answerCallbackQuery(query.id, { text: `Generating ${modeLabel} PDF...` });
     
     const pairs = st.pendingPairs || [];
     if (pairs.length === 0) {
@@ -691,10 +700,12 @@ bot.on("callback_query", async (query) => {
 
       const outPdf = path.join(jobDir, "pub_exact_layout.pdf");
       
-      // Use multi-ID function with flip option
-      await makeMultiIdPdf(pairsToUse, outPdf, flipImages);
+      // Use multi-ID function with flip or reverse option
+      await makeMultiIdPdf(pairsToUse, outPdf, flipImages, swapSides);
 
-      await bot.sendDocument(chatId, outPdf, {}, { filename: `pub_${pairs.length}ids_${flipImages ? 'flipped' : 'normal'}.pdf` });
+      const filenameSuffix = flipImages ? "flipped_reversed" : swapSides ? "reversed" : "normal";
+      const timestamp = Date.now();
+      await bot.sendDocument(chatId, outPdf, {}, { filename: `pub_${pairs.length}ids_${filenameSuffix}_${timestamp}.pdf` });
       
       // Show success message with reset button
       const resetKeyboard = {
@@ -707,7 +718,7 @@ bot.on("callback_query", async (query) => {
       
       await bot.sendMessage(
         chatId,
-        `✅ PDF generated with ${pairs.length} ID(s) (${flipImages ? 'Flipped' : 'Normal'}).`,
+        `✅ PDF generated with ${pairs.length} ID(s) (${modeLabel}).`,
         { reply_markup: resetKeyboard }
       );
       
