@@ -265,13 +265,13 @@ async function stampLabel(inputImgPath, labelText, outPath) {
 // Back size: 3.43" x 2.22" (246.96 x 159.84 points)
 // Front size: same as back (246.96 x 159.84 points)
 // Front/back horizontal gap: 5pt
-// Symmetrical margins: 25.15pt from each edge
+// Symmetrical margins: 32.65pt from each edge
 // Conversion: 1 inch = 72 points
 const LAYOUT = {
   pageWpt: 595.30,
   pageHpt: 841.90,
-  frontBox: { x: 25.15, y: 0, w: 270, h: 159.84 },
-  backBox: { x: 300.15, y: 0, w: 270, h: 159.84 }
+  frontBox: { x: 32.65, y: 0, w: 270, h: 159.84 },
+  backBox: { x: 307.65, y: 0, w: 270, h: 159.84 }
 };
 
 /* ==================================
