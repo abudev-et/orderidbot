@@ -262,20 +262,20 @@ async function stampLabel(inputImgPath, labelText, outPath) {
 
 // Layout with exact measurements from PUB template
 // Page: 8.268" × 11.693" (595.30 × 841.90 points)
-// Back size: 3.43" x 2.22" (246.96 x 159.84 points)
-// Front size: same as back (246.96 x 159.84 points)
-// Front/back horizontal gap: 10pt
-// Symmetrical margins: 30.15pt from each edge
-// Conversion: 1 inch = 72 points
+// Back size: 970px x 666px at 300 DPI (232.8pt x 159.84pt)
+// Front size: same as back (232.8pt x 159.84pt)
+// Front/back horizontal gap: 100px at 300 DPI (24pt)
+// Symmetrical margins: 52.85pt from each edge
+// Conversion: 1 inch = 72 points, at 300 DPI: 1pt = 4.167px
 const LAYOUT = {
   pageWpt: 595.30,
   pageHpt: 841.90,
-  frontBox: { x: 30.15, y: 0, w: 255, h: 159.84 },
-  backBox: { x: 310.15, y: 0, w: 255, h: 159.84 }
+  frontBox: { x: 52.85, y: 0, w: 232.8, h: 159.84 },
+  backBox: { x: 309.65, y: 0, w: 232.8, h: 159.84 }
 };
 
 /* ==================================
-   2) Generate PDF (same as PUB page)
+   2) Generate PDF(same as PUB page)
    ================================== */
 
 async function makeSinglePagePdf(frontImg, backImg, outPdf) {
@@ -392,6 +392,88 @@ async function makeMultiIdPdf(pairs, outPdf, flipImages = false, swapSides = fal
   return outPdf;
 }
 
+async function makeMultiIdJpg(pairs, outJpg, flipImages = false, swapSides = false) {
+  const count = Math.min(pairs.length, 5);
+  
+  // Convert points to pixels at 300 DPI for high-quality printing
+  // 1 point = 1/72 inch, at 300 DPI: 1 point = 300/72 = 4.166667 pixels
+  const scale = 300 / 72;
+  const pageW = Math.round(LAYOUT.pageWpt * scale);
+  const pageH = Math.round(LAYOUT.pageHpt * scale);
+  
+  // Create white background
+  const background = await sharp({
+    create: {
+      width: pageW,
+      height: pageH,
+      channels: 3,
+      background: { r: 255, g: 255, b: 255 }
+    }
+  }).png().toBuffer();
+  
+  const composites = [];
+  
+  const firstFrontX = swapSides ? LAYOUT.backBox.x : LAYOUT.frontBox.x;
+  const firstBackX = swapSides ? LAYOUT.frontBox.x : LAYOUT.backBox.x;
+  
+  const topMargin = 21.3;
+  const rowGap = 1.41 * 72 / 25.4;
+  const rowStep = LAYOUT.backBox.h + rowGap;
+  const verticalPositions = Array.from({ length: 5 }, (_, i) => topMargin + (i * rowStep));
+  
+  for (let i = 0; i < count; i++) {
+    const row = i;
+    const frontX = firstFrontX;
+    const backX = firstBackX;
+    const topY = verticalPositions[row] ?? verticalPositions[verticalPositions.length - 1];
+    const frontY = topY;
+    const backY = topY;
+    
+    // Process front image
+    let frontBuffer = await sharp(pairs[i].front)
+      .resize(Math.round(LAYOUT.frontBox.w * scale), Math.round(LAYOUT.frontBox.h * scale), {
+        fit: 'fill'
+      })
+      .toBuffer();
+    
+    if (flipImages) {
+      frontBuffer = await sharp(frontBuffer).flop().toBuffer();
+    }
+    
+    composites.push({
+      input: frontBuffer,
+      left: Math.round(frontX * scale),
+      top: Math.round(frontY * scale)
+    });
+    
+    // Process back image
+    let backBuffer = await sharp(pairs[i].back)
+      .resize(Math.round(LAYOUT.backBox.w * scale), Math.round(LAYOUT.backBox.h * scale), {
+        fit: 'fill'
+      })
+      .toBuffer();
+    
+    if (flipImages) {
+      backBuffer = await sharp(backBuffer).flop().toBuffer();
+    }
+    
+    composites.push({
+      input: backBuffer,
+      left: Math.round(backX * scale),
+      top: Math.round(backY * scale)
+    });
+  }
+  
+  // Composite all images onto the background
+  await sharp(background)
+    .composite(composites)
+    .jpeg({ quality: 95, chromaSubsampling: '4:4:4' })
+    .withMetadata({ density: 300 })
+    .toFile(outJpg);
+  
+  return outJpg;
+}
+
 /* ======================
    3) Telegram bot logic
    ====================== */
@@ -430,7 +512,7 @@ bot.onText(/\/start/, async (msg) => {
       "4) Repeat for more IDs",
       "",
       "When done:",
-      "📄 /pdf - generates PDF with all IDs",
+      "�️ /pdf - generates high-quality JPG (300 DPI) with all IDs",
       "",
       "Commands:",
       "/status - check current progress",
@@ -604,7 +686,7 @@ bot.onText(/\/pdf/, async (msg) => {
   
   await bot.sendMessage(
     chatId,
-    `📋 Ready to generate PDF with ${pairs.length} ID(s).\n\nChoose orientation:\nNormal = front left, back right\nReverse = back left, front right\nFlip + Reverse = mirror images + swap sides`,
+    `📋 Ready to generate high-quality JPG with ${pairs.length} ID(s).\n\nChoose orientation:\nNormal = front left, back right\nReverse = back left, front right\nFlip + Reverse = mirror images + swap sides`,
     { reply_markup: keyboard }
   );
 });
@@ -670,7 +752,7 @@ bot.on("callback_query", async (query) => {
     
     // Answer callback to remove loading state
     const modeLabel = flipImages ? "flipped + reversed" : swapSides ? "reversed" : "normal";
-    await bot.answerCallbackQuery(query.id, { text: `Generating ${modeLabel} PDF...` });
+    await bot.answerCallbackQuery(query.id, { text: `Generating ${modeLabel} JPG...` });
     
     const pairs = st.pendingPairs || [];
     if (pairs.length === 0) {
@@ -697,14 +779,16 @@ bot.on("callback_query", async (query) => {
         pairsToUse.push(...pairs);
       }
 
-      const outPdf = path.join(jobDir, "pub_exact_layout.pdf");
+      const outJpg = path.join(jobDir, "pub_exact_layout.jpg");
       
-      // Use multi-ID function with flip or reverse option
-      await makeMultiIdPdf(pairsToUse, outPdf, flipImages, swapSides);
+      // Generate high-quality JPG for printing
+      await makeMultiIdJpg(pairsToUse, outJpg, flipImages, swapSides);
 
       const filenameSuffix = flipImages ? "flipped_reversed" : swapSides ? "reversed" : "normal";
       const timestamp = Date.now();
-      await bot.sendDocument(chatId, outPdf, {}, { filename: `pub_${pairs.length}ids_${filenameSuffix}_${timestamp}.pdf` });
+      
+      // Send high-quality JPG
+      await bot.sendDocument(chatId, outJpg, {}, { filename: `pub_${pairs.length}ids_${filenameSuffix}_${timestamp}_300dpi.jpg` });
       
       // Show success message with reset button
       const resetKeyboard = {
@@ -717,7 +801,7 @@ bot.on("callback_query", async (query) => {
       
       await bot.sendMessage(
         chatId,
-        `✅ PDF generated with ${pairs.length} ID(s) (${modeLabel}).`,
+        `✅ High-quality JPG generated with ${pairs.length} ID(s) (${modeLabel})\n️ 300 DPI - Ready for printing`,
         { reply_markup: resetKeyboard }
       );
       
