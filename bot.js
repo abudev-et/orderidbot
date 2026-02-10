@@ -262,16 +262,16 @@ async function stampLabel(inputImgPath, labelText, outPath) {
 
 // Layout with exact measurements from PUB template
 // Page: 8.268" × 11.693" (595.30 × 841.90 points)
-// Back size: 970px x 666px at 300 DPI (232.8pt x 159.84pt)
-// Front size: same as back (232.8pt x 159.84pt)
-// Front/back horizontal gap: 100px at 300 DPI (24pt)
-// Symmetrical margins: 52.85pt from each edge
-// Conversion: 1 inch = 72 points, at 300 DPI: 1pt = 4.167px
+// Back size: 3.33" x 2.15" (250pt x 154.8pt)
+// Front size: same as back (250pt x 154.8pt)
+// Front/back horizontal gap: 0.25" (18pt)
+// Symmetrical margins: 47.65pt left/right, 343.55pt top/bottom
+// Conversion: 1 inch = 72 points
 const LAYOUT = {
   pageWpt: 595.30,
   pageHpt: 841.90,
-  frontBox: { x: 52.85, y: 0, w: 232.8, h: 159.84 },
-  backBox: { x: 309.65, y: 0, w: 232.8, h: 159.84 }
+  frontBox: { x: 47.65, y: 343.55, w: 250, h: 154.8 },
+  backBox: { x: 307.65, y: 343.55, w: 250, h: 154.8 }
 };
 
 /* ==================================
