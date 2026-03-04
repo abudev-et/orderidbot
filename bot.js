@@ -88,7 +88,9 @@ function getState(chatId) {
       lastImagePath: null,
       lastImageOrder: null,
       pendingImages: [],
-      awaitingNews: false
+      awaitingNews: false,
+      uiShown: false,
+      uiMessageId: null
     });
   }
   return state.get(chatId);
@@ -186,6 +188,62 @@ function buildPairsFromGroups(groups) {
   }
 
   return { pairs, incompleteGroups };
+}
+
+function countTemplates(st) {
+  const frontCount = st.fronts?.length || 0;
+  const backCount = st.backs?.length || 0;
+  const totalTemplates = Math.min(frontCount, backCount);
+  return { frontCount, backCount, totalTemplates };
+}
+
+function createTemplateUI(st) {
+  const { frontCount, backCount, totalTemplates } = countTemplates(st);
+  
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: `📄 Front Page: ${frontCount}`, callback_data: "ui_front" },
+        { text: `📄 Back Page: ${backCount}`, callback_data: "ui_back" }
+      ],
+      [
+        { text: `📋 Total Template: ${totalTemplates}`, callback_data: "ui_total" },
+        { text: `📥 PDF`, callback_data: "ui_pdf" }
+      ]
+    ]
+  };
+  
+  return keyboard;
+}
+
+function shouldShowUI(st) {
+  const { frontCount, backCount, totalTemplates } = countTemplates(st);
+  return !st.uiShown && (frontCount > 0 || backCount > 0);
+}
+
+async function showTemplateUI(chatId, st) {
+  const keyboard = createTemplateUI(st);
+  const messageText = "🎯 **Template Processing Interface**\n\nUse the buttons below to manage your templates:";
+  
+  if (st.uiMessageId && st.uiShown) {
+    // Edit existing message
+    try {
+      await bot.editMessageText(messageText, {
+        chat_id: chatId,
+        message_id: st.uiMessageId,
+        reply_markup: keyboard
+      });
+    } catch (e) {
+      // If editing fails (message might be deleted), send new message
+      const sentMessage = await bot.sendMessage(chatId, messageText, { reply_markup: keyboard });
+      st.uiMessageId = sentMessage.message_id;
+    }
+  } else {
+    // Send new message
+    const sentMessage = await bot.sendMessage(chatId, messageText, { reply_markup: keyboard });
+    st.uiMessageId = sentMessage.message_id;
+    st.uiShown = true;
+  }
 }
 
 async function broadcastNews(message) {
@@ -416,7 +474,9 @@ bot.onText(/\/start/, async (msg) => {
     lastImagePath: null,
     lastImageOrder: null,
     pendingImages: [],
-    awaitingNews: false
+    awaitingNews: false,
+    uiShown: false,
+    uiMessageId: null
   });
   await bot.sendMessage(
     chatId,
@@ -439,6 +499,8 @@ bot.onText(/\/start/, async (msg) => {
       "",
       "When done:",
       "📄 /pdf - generates PDF with all IDs (multi-page if needed)",
+      "",
+      "🎯 **New Feature**: Persistent Template UI appears immediately after first image and updates in real-time!",
       "",
       "Commands:",
       "/status - check current progress",
@@ -490,7 +552,9 @@ bot.onText(/\/reset/, async (msg) => {
         lastImagePath: null,
         lastImageOrder: null,
         pendingImages: [],
-        awaitingNews: false
+        awaitingNews: false,
+        uiShown: false,
+        uiMessageId: null
       });
       await bot.sendMessage(chatId, "✅ Reset done. Your data cleared.");
     } catch (e) {
@@ -549,6 +613,11 @@ bot.onText(/\/front/, async (msg) => {
     const counts = addLabeledImage(st, "front", img.path, img.seq);
     const frontCount = counts.frontCount;
     const backCount = counts.backCount;
+    
+    // Update template UI immediately (creates new or updates existing)
+    await showTemplateUI(chatId, st);
+    
+    // Then send confirmation message
     await bot.sendMessage(chatId, `?o. FRONT #${frontCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
   });
 });
@@ -566,6 +635,11 @@ bot.onText(/\/back/, async (msg) => {
     const counts = addLabeledImage(st, "back", img.path, img.seq);
     const frontCount = counts.frontCount;
     const backCount = counts.backCount;
+    
+    // Update template UI immediately (creates new or updates existing)
+    await showTemplateUI(chatId, st);
+    
+    // Then send confirmation message
     await bot.sendMessage(chatId, `?o. BACK #${backCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
   });
 });
@@ -662,7 +736,9 @@ bot.on("callback_query", async (query) => {
         lastImagePath: null,
         lastImageOrder: null,
         pendingImages: [],
-        awaitingNews: false
+        awaitingNews: false,
+        uiShown: false,
+        uiMessageId: null
       });
       await bot.sendMessage(chatId, "✅ Reset done. Your data cleared.\n\nSend new images to start over!");
     } catch (e) {
@@ -739,6 +815,67 @@ bot.on("callback_query", async (query) => {
     } catch (e) {
       await bot.sendMessage(chatId, `Failed: ${e.message}`);
     }
+  } else if (data === "ui_front") {
+    const { frontCount } = countTemplates(st);
+    await bot.answerCallbackQuery(query.id, { text: `Front pages: ${frontCount}` });
+    await bot.sendMessage(chatId, `📄 **Front Pages**: ${frontCount}\n\nThese are the front side images you've uploaded.`);
+    
+    // Refresh UI to show current counts
+    await showTemplateUI(chatId, st);
+  } else if (data === "ui_back") {
+    const { backCount } = countTemplates(st);
+    await bot.answerCallbackQuery(query.id, { text: `Back pages: ${backCount}` });
+    await bot.sendMessage(chatId, `📄 **Back Pages**: ${backCount}\n\nThese are the back side images you've uploaded.`);
+    
+    // Refresh UI to show current counts
+    await showTemplateUI(chatId, st);
+  } else if (data === "ui_total") {
+    const { totalTemplates } = countTemplates(st);
+    await bot.answerCallbackQuery(query.id, { text: `Total templates: ${totalTemplates}` });
+    await bot.sendMessage(chatId, `📋 **Total Templates**: ${totalTemplates}\n\nComplete template pairs (front + back) ready for PDF generation.`);
+    
+    // Refresh UI to show current counts
+    await showTemplateUI(chatId, st);
+  } else if (data === "ui_pdf") {
+    // Trigger PDF generation
+    await bot.answerCallbackQuery(query.id, { text: "Generating PDF..." });
+    
+    const groups = st.imageGroups || [[]];
+    const { pairs, incompleteGroups } = buildPairsFromGroups(groups);
+
+    if (incompleteGroups > 0) {
+      await bot.sendMessage(
+        chatId,
+        "Front and back must be equal for each ID group. Please add the missing side(s) or /reset."
+      );
+      return;
+    }
+    if (pairs.length === 0) {
+      await bot.sendMessage(chatId, "I need at least one complete ID (1 front + 1 back). Send images and mark them as front/back.");
+      return;
+    }
+
+    // Store pairs in state for callback handler
+    st.pendingPairs = pairs;
+
+    // Show orientation selection buttons
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: "📄 Normal", callback_data: "pdf_normal" },
+          { text: "Reverse", callback_data: "pdf_reverse" }
+        ],
+        [
+          { text: "🔄 Flip + Reverse", callback_data: "pdf_flip" }
+        ]
+      ]
+    };
+
+    await bot.sendMessage(
+      chatId,
+      `📋 Ready to generate PDF with ${pairs.length} ID(s).\n\nChoose orientation:\nNormal = front left, back right\nReverse = back left, front right\nFlip + Reverse = mirror images + swap sides\n\n📄 Multi-page auto-generated if more than 5 IDs.`,
+      { reply_markup: keyboard }
+    );
   }
 });
 
@@ -790,6 +927,11 @@ bot.on("message", async (msg) => {
       const counts = addLabeledImage(st, "front", img.path, img.seq);
       const frontCount = counts.frontCount;
       const backCount = counts.backCount;
+      
+      // Update template UI immediately (creates new or updates existing)
+      await showTemplateUI(chatId, st);
+      
+      // Then send confirmation message
       await bot.sendMessage(chatId, `?o. FRONT #${frontCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
     });
   }
@@ -804,6 +946,11 @@ bot.on("message", async (msg) => {
       const counts = addLabeledImage(st, "back", img.path, img.seq);
       const frontCount = counts.frontCount;
       const backCount = counts.backCount;
+      
+      // Update template UI immediately (creates new or updates existing)
+      await showTemplateUI(chatId, st);
+      
+      // Then send confirmation message
       await bot.sendMessage(chatId, `?o. BACK #${backCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
     });
   }
@@ -843,12 +990,22 @@ bot.on("photo", async (msg) => {
       const counts = addLabeledImage(st, "front", imgPath, order);
       const frontCount = counts.frontCount;
       const backCount = counts.backCount;
+      
+      // Update template UI immediately (creates new or updates existing)
+      await showTemplateUI(chatId, st);
+      
+      // Then send confirmation message
       await bot.sendMessage(chatId, `?o. FRONT #${frontCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
     } else if (caption.includes("back")) {
       // No limit on back images - multi-page support
       const counts = addLabeledImage(st, "back", imgPath, order);
       const frontCount = counts.frontCount;
       const backCount = counts.backCount;
+      
+      // Update template UI immediately (creates new or updates existing)
+      await showTemplateUI(chatId, st);
+      
+      // Then send confirmation message
       await bot.sendMessage(chatId, `?o. BACK #${backCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
     } else {
       if (pending) pending.ready = true;
@@ -899,12 +1056,22 @@ bot.on("document", async (msg) => {
       const counts = addLabeledImage(st, "front", outPath, order);
       const frontCount = counts.frontCount;
       const backCount = counts.backCount;
+      
+      // Update template UI immediately (creates new or updates existing)
+      await showTemplateUI(chatId, st);
+      
+      // Then send confirmation message
       await bot.sendMessage(chatId, `?o. FRONT #${frontCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
     } else if (caption.includes("back")) {
       // No limit on back images - multi-page support
       const counts = addLabeledImage(st, "back", outPath, order);
       const frontCount = counts.frontCount;
       const backCount = counts.backCount;
+      
+      // Update template UI immediately (creates new or updates existing)
+      await showTemplateUI(chatId, st);
+      
+      // Then send confirmation message
       await bot.sendMessage(chatId, `?o. BACK #${backCount}. Total: ${frontCount} fronts, ${backCount} backs. /pdf`);
     } else {
       if (pending) pending.ready = true;
@@ -921,3 +1088,4 @@ bot.on("document", async (msg) => {
    Startup
    ========== */
 console.log("✅ Bot is running...");
+  
